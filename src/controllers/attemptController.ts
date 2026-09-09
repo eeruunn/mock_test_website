@@ -190,3 +190,33 @@ export const submitAttempt = async (req: AuthRequest, res: Response) => {
     res.status(500).json({ error: "Something went wrong" });
   }
 };
+
+// GET /api/attempts/:id/result
+export const getResult = async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.userId;
+    const { id: attemptId } = req.params;
+
+    const attempt = await prisma.attempt.findUnique({
+      where: { id: attemptId },
+      include: { result: true },
+    });
+
+    if (!attempt) {
+      return res.status(404).json({ error: "Attempt not found" });
+    }
+    if (attempt.userId !== userId) {
+      return res.status(403).json({ error: "This is not your attempt" });
+    }
+    if (attempt.status !== "submitted" || !attempt.result) {
+      return res
+        .status(400)
+        .json({ error: "This attempt has not been submitted yet" });
+    }
+
+    res.json(attempt.result);
+  } catch (error) {
+    console.error("Get result error:", error);
+    res.status(500).json({ error: "Something went wrong" });
+  }
+};
