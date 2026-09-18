@@ -287,3 +287,42 @@ export const getResult = async (req: AuthRequest, res: Response) => {
     res.status(500).json({ error: "Something went wrong" });
   }
 };
+
+// GET /api/attempts/history
+export const getAttemptHistory = async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.userId;
+
+    const attempts = await prisma.attempt.findMany({
+      where: { userId },
+      orderBy: { startedAt: "desc" },
+      select: {
+        id: true,
+        status: true,
+        startedAt: true,
+        submittedAt: true,
+        exam: {
+          select: {
+            id: true,
+            title: true,
+            slug: true,
+            totalMarks: true,
+          },
+        },
+        result: {
+          select: {
+            totalMarksScored: true,
+            totalCorrect: true,
+            totalWrong: true,
+            totalUnattempted: true,
+          },
+        },
+      },
+    });
+
+    res.json(attempts);
+  } catch (error) {
+    console.error("Get attempt history error:", error);
+    res.status(500).json({ error: "Something went wrong" });
+  }
+};
