@@ -47,11 +47,12 @@ export const startAttempt = async (req: AuthRequest, res: Response) => {
     res.status(500).json({ error: "Something went wrong" });
   }
 };
+
 // PATCH /api/attempts/:id/answer
 export const saveAnswer = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.userId;
-    const { id: attemptId } = req.params;
+    const attemptId = req.params.id as string;
     const {
       questionId,
       selectedOptionIds,
@@ -59,6 +60,10 @@ export const saveAnswer = async (req: AuthRequest, res: Response) => {
       isFlagged,
       timeSpentSec,
     } = req.body;
+
+    if (!questionId) {
+      return res.status(400).json({ error: "questionId is required" });
+    }
 
     const attempt = await prisma.attempt.findUnique({
       where: { id: attemptId },
@@ -77,6 +82,27 @@ export const saveAnswer = async (req: AuthRequest, res: Response) => {
     }
     if (attempt.expiresAt && new Date() > attempt.expiresAt) {
       return res.status(400).json({ error: "This attempt has expired" });
+    }
+
+    // Validate the question actually belongs to this exam
+    const question: any = await prisma.question.findUnique({
+      where: { id: questionId },
+      include: { section: true, options: true },
+    });
+
+    if (!question || question.section.examId !== attempt.examId) {
+      return res.status(400).json({ error: "Invalid question for this exam" });
+    }
+
+    // Validate selectedOptionIds actually belong to this question
+    if (selectedOptionIds && selectedOptionIds.length > 0) {
+      const validOptionIds = new Set(question.options.map((o: any) => o.id));
+      const allValid = selectedOptionIds.every((id: string) =>
+        validOptionIds.has(id)
+      );
+      if (!allValid) {
+        return res.status(400).json({ error: "Invalid option selected" });
+      }
     }
 
     const response = await prisma.response.upsert({
@@ -110,12 +136,18 @@ export const saveAnswer = async (req: AuthRequest, res: Response) => {
 export const submitAttempt = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.userId;
-    const { id: attemptId } = req.params;
+    const attemptId = req.params.id as string;
 
-    const attempt = await prisma.attempt.findUnique({
+    const attempt: any = await prisma.attempt.findUnique({
       where: { id: attemptId },
       include: {
-        responses: { include: { question: { include: { options: true } } } },
+        responses: {
+          include: {
+            question: {
+              include: { options: true, section: true },
+            },
+          },
+        },
       },
     });
 
@@ -131,42 +163,77 @@ export const submitAttempt = async (req: AuthRequest, res: Response) => {
         .json({ error: "This attempt was already submitted" });
     }
 
-    // Score each response
+    const allQuestions: any[] = await prisma.question.findMany({
+      where: { section: { examId: attempt.examId } },
+      include: { section: true, options: true },
+    });
+
+    const responseByQuestionId = new Map(
+      attempt.responses.map((r: any) => [r.questionId, r])
+    );
+
+    const sectionStats: Record<string, any> = {};
+
     let totalMarksScored = 0;
     let totalCorrect = 0;
     let totalWrong = 0;
+    let totalUnattempted = 0;
 
-    for (const response of attempt.responses) {
-      const correctOptionIds: string[] = response.question.options
-        .filter((o: { isCorrect: boolean }) => o.isCorrect)
-        .map((o: { id: string }) => o.id);
+    for (const question of allQuestions) {
+      const sectionId = question.sectionId;
+      if (!sectionStats[sectionId]) {
+        sectionStats[sectionId] = {
+          sectionId,
+          sectionName: question.section.name,
+          marks: 0,
+          correct: 0,
+          wrong: 0,
+          unattempted: 0,
+        };
+      }
+
+      const response: any = responseByQuestionId.get(question.id);
+
+      if (!response || response.selectedOptionIds.length === 0) {
+        sectionStats[sectionId].unattempted++;
+        totalUnattempted++;
+        if (response) {
+          await prisma.response.update({
+            where: { id: response.id },
+            data: { isCorrect: null, marksAwarded: 0 },
+          });
+        }
+        continue;
+      }
+
+      const correctOptionIds = question.options
+        .filter((o: any) => o.isCorrect)
+        .map((o: any) => o.id);
 
       const isCorrect =
-        response.selectedOptionIds.length > 0 &&
         response.selectedOptionIds.length === correctOptionIds.length &&
         response.selectedOptionIds.every((id: string) =>
           correctOptionIds.includes(id)
         );
-      const marksAwarded = isCorrect
-        ? response.question.marks
-        : response.selectedOptionIds.length > 0
-        ? -response.question.negativeMarks
-        : 0;
 
-      totalMarksScored += marksAwarded;
-      if (isCorrect) totalCorrect++;
-      else if (response.selectedOptionIds.length > 0) totalWrong++;
+      const marksAwarded = isCorrect ? question.marks : -question.negativeMarks;
 
       await prisma.response.update({
         where: { id: response.id },
         data: { isCorrect, marksAwarded },
       });
-    }
 
-    const totalQuestions = await prisma.question.count({
-      where: { section: { examId: attempt.examId } },
-    });
-    const totalUnattempted = totalQuestions - attempt.responses.length;
+      sectionStats[sectionId].marks += marksAwarded;
+      totalMarksScored += marksAwarded;
+
+      if (isCorrect) {
+        sectionStats[sectionId].correct++;
+        totalCorrect++;
+      } else {
+        sectionStats[sectionId].wrong++;
+        totalWrong++;
+      }
+    }
 
     await prisma.attempt.update({
       where: { id: attemptId },
@@ -180,7 +247,7 @@ export const submitAttempt = async (req: AuthRequest, res: Response) => {
         totalCorrect,
         totalWrong,
         totalUnattempted,
-        sectionBreakdown: {}, // we'll build this out properly later
+        sectionBreakdown: Object.values(sectionStats),
       },
     });
 
@@ -195,7 +262,7 @@ export const submitAttempt = async (req: AuthRequest, res: Response) => {
 export const getResult = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.userId;
-    const { id: attemptId } = req.params;
+    const attemptId = req.params.id as string;
 
     const attempt = await prisma.attempt.findUnique({
       where: { id: attemptId },
