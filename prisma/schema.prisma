@@ -42,6 +42,7 @@ model Purchase {
   razorpayPaymentId String?
   createdAt         DateTime     @default(now())
   paidAt            DateTime?
+  expiresAt         DateTime?    // set when paidAt is set, = paidAt + 30 days
 }
 model Exam {
   id                 String       @id @default(uuid())

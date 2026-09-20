@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import authRoutes from "./routes/authRoutes";
 import examRoutes from "./routes/examRoutes";
 import attemptRoutes from "./routes/attemptRoutes";
+import purchaseRoutes from "./routes/purchaseRoutes";
 
 dotenv.config();
 
@@ -25,3 +26,4 @@ app.listen(PORT, () => {
 
 app.use("/api/exams", examRoutes);
 app.use("/api/attempts", attemptRoutes);
+app.use("/api/purchases", purchaseRoutes);
