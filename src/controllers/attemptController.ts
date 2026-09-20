@@ -12,9 +12,24 @@ export const startAttempt = async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: "examId is required" });
     }
 
-    const exam = await prisma.exam.findUnique({ where: { id: examId } });
+    const exam = await prisma.exam.findUnique({
+      where: { id: examId },
+      include: { category: true },
+    });
     if (!exam || !exam.isPublished) {
       return res.status(404).json({ error: "Exam not found" });
+    }
+
+    // Check access if this exam's category is a paid one
+    if (exam.category.price > 0) {
+      const purchase = await prisma.purchase.findFirst({
+        where: { userId, categoryId: exam.categoryId, status: "paid" },
+      });
+      if (!purchase) {
+        return res
+          .status(402)
+          .json({ error: "Payment required for this category" });
+      }
     }
 
     // Prevent starting a new attempt if one is already in progress for this exam

@@ -17,16 +17,32 @@ model User {
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
   attempts     Attempt[]
+  purchases    Purchase[]
 }
 
 model ExamCategory {
-  id          Int      @id @default(autoincrement())
+  id          Int         @id @default(autoincrement())
   name        String
-  slug        String   @unique
+  slug        String      @unique
   description String?
+  price       Float       @default(0)   // 0 = free category
   exams       Exam[]
+  purchases   Purchase[]
 }
 
+model Purchase {
+  id                String       @id @default(uuid())
+  userId            String
+  user              User         @relation(fields: [userId], references: [id])
+  categoryId        Int
+  category          ExamCategory @relation(fields: [categoryId], references: [id])
+  amount            Float
+  status            String       @default("pending") // 'pending', 'paid', 'failed'
+  razorpayOrderId   String?
+  razorpayPaymentId String?
+  createdAt         DateTime     @default(now())
+  paidAt            DateTime?
+}
 model Exam {
   id                 String       @id @default(uuid())
   categoryId         Int
