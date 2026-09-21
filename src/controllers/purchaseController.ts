@@ -28,49 +28,63 @@ export const getMyPurchases = async (req: AuthRequest, res: Response) => {
 export const createOrder = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.userId;
-    const { categoryId } = req.body;
+    const { categoryIds } = req.body;
 
-    if (!categoryId) {
-      return res.status(400).json({ error: "categoryId is required" });
+    if (!Array.isArray(categoryIds) || categoryIds.length === 0) {
+      return res
+        .status(400)
+        .json({ error: "categoryIds must be a non-empty array" });
     }
 
-    const category = await prisma.examCategory.findUnique({
-      where: { id: categoryId },
+    const categories = await prisma.examCategory.findMany({
+      where: { id: { in: categoryIds } },
     });
 
-    if (!category) {
-      return res.status(404).json({ error: "Category not found" });
+    if (categories.length !== categoryIds.length) {
+      return res
+        .status(404)
+        .json({ error: "One or more categories not found" });
     }
-    if (category.price <= 0) {
-      return res.status(400).json({ error: "This category is free" });
+    if (categories.some((c) => c.price <= 0)) {
+      return res.status(400).json({ error: "One or more categories are free" });
     }
 
-    // Razorpay wants amount in paise (smallest currency unit), not rupees
-    const amountInPaise = Math.round(category.price * 100);
+    const totalAmount = categories.reduce((sum, c) => sum + c.price, 0);
+    const amountInPaise = Math.round(totalAmount * 100);
 
     const order = await razorpay.orders.create({
       amount: amountInPaise,
       currency: "INR",
-      receipt: `cat_${categoryId}_${Date.now()}`,
+      receipt: `bundle_${Date.now()}`,
     });
 
-    // Create a pending Purchase record tied to this order
-    const purchase = await prisma.purchase.create({
-      data: {
-        userId,
-        categoryId,
-        amount: category.price,
-        status: "pending",
-        razorpayOrderId: order.id,
-      },
-    });
+    // Create one pending Purchase per category, all tied to this order
+    const purchases = await Promise.all(
+      categories.map((cat) =>
+        prisma.purchase.create({
+          data: {
+            userId,
+            categoryId: cat.id,
+            amount: cat.price,
+            status: "pending",
+            razorpayOrderId: order.id,
+          },
+        })
+      )
+    );
 
     res.json({
       orderId: order.id,
       amount: amountInPaise,
       currency: "INR",
       keyId: process.env.RAZORPAY_KEY_ID,
-      purchaseId: purchase.id,
+      purchaseIds: purchases.map((p) => p.id),
+      totalAmount,
+      categories: categories.map((c) => ({
+        id: c.id,
+        name: c.name,
+        price: c.price,
+      })),
     });
   } catch (error) {
     console.error("Create order error:", error);
@@ -82,25 +96,15 @@ export const createOrder = async (req: AuthRequest, res: Response) => {
 export const verifyPayment = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.userId;
-    const {
-      razorpay_order_id,
-      razorpay_payment_id,
-      razorpay_signature,
-      purchaseId,
-    } = req.body;
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature } =
+      req.body;
 
-    if (
-      !razorpay_order_id ||
-      !razorpay_payment_id ||
-      !razorpay_signature ||
-      !purchaseId
-    ) {
+    if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
       return res
         .status(400)
         .json({ error: "Missing payment verification fields" });
     }
 
-    // Verify the signature is genuinely from Razorpay, not spoofed
     const expectedSignature = crypto
       .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET as string)
       .update(`${razorpay_order_id}|${razorpay_payment_id}`)
@@ -110,22 +114,20 @@ export const verifyPayment = async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: "Payment verification failed" });
     }
 
-    const purchase = await prisma.purchase.findUnique({
-      where: { id: purchaseId },
+    // Find every pending purchase tied to this order, for this user
+    const purchases = await prisma.purchase.findMany({
+      where: { razorpayOrderId: razorpay_order_id, userId, status: "pending" },
     });
 
-    if (!purchase || purchase.userId !== userId) {
-      return res.status(404).json({ error: "Purchase not found" });
-    }
-    if (purchase.razorpayOrderId !== razorpay_order_id) {
-      return res.status(400).json({ error: "Order mismatch" });
+    if (purchases.length === 0) {
+      return res.status(404).json({ error: "No matching purchases found" });
     }
 
     const paidAt = new Date();
-    const expiresAt = new Date(paidAt.getTime() + 30 * 24 * 60 * 60 * 1000); // +30 days
+    const expiresAt = new Date(paidAt.getTime() + 30 * 24 * 60 * 60 * 1000);
 
-    const updated = await prisma.purchase.update({
-      where: { id: purchaseId },
+    await prisma.purchase.updateMany({
+      where: { razorpayOrderId: razorpay_order_id, userId, status: "pending" },
       data: {
         status: "paid",
         razorpayPaymentId: razorpay_payment_id,
@@ -134,7 +136,10 @@ export const verifyPayment = async (req: AuthRequest, res: Response) => {
       },
     });
 
-    res.json(updated);
+    res.json({
+      success: true,
+      categoriesUnlocked: purchases.map((p) => p.categoryId),
+    });
   } catch (error) {
     console.error("Verify payment error:", error);
     res.status(500).json({ error: "Something went wrong" });
